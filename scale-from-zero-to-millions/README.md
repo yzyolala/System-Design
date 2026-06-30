@@ -11,6 +11,10 @@
 5. [CDN 内容分发网络](05-cdn.md)
 6. [无状态 Web 层](06-stateless-web-tier.md)
 7. [数据中心 Data Centers](07-data-centers.md)
+8. [消息队列 Message Queue](08-message-queue.md)
+9. [日志、指标与自动化](09-logging-metrics-automation.md)
+10. [数据库扩展与 Sharding](10-database-scaling-and-sharding.md)
+11. [Millions of Users and Beyond 总结](11-millions-and-beyond-summary.md)
 
 ## 总体演进路线
 
@@ -26,10 +30,14 @@ flowchart TD
     H["8. Add CDN<br/>Serve static assets closer to users"]
     I["9. Make web tier stateless<br/>Move session/state to shared storage"]
     J["10. Add data centers<br/>Improve latency and disaster recovery"]
+    K["11. Add message queue<br/>Decouple producers and consumers"]
+    L["12. Add logging / metrics / automation<br/>Observe and operate the system"]
+    M["13. Scale data tier by sharding<br/>Split data across shards"]
+    N["14. Split tiers into services<br/>Scale beyond millions"]
 
-    A --> B --> C --> D --> E --> F --> G --> H --> I --> J
+    A --> B --> C --> D --> E --> F --> G --> H --> I --> J --> K --> L --> M --> N
 ```
 
 ## 一句话总览
 
-从零到百万用户的系统设计，不是一次性设计出复杂架构，而是在流量增长时逐步识别瓶颈：先拆数据库，再水平扩展 Web 层，加负载均衡和数据库复制，随后用缓存和 CDN 降低延迟，最后通过无状态 Web 层和多数据中心提升可扩展性与容灾能力。
+从零到百万用户的系统设计，不是一次性设计出复杂架构，而是在流量增长时逐步识别瓶颈：先拆数据库，再水平扩展 Web 层，加负载均衡和数据库复制，随后用缓存和 CDN 降低延迟，通过无状态 Web 层和多数据中心提升可扩展性与容灾能力，再用消息队列、日志监控自动化、数据库分片和服务拆分继续支撑更大规模。
