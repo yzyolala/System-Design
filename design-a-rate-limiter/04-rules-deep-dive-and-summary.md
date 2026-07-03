@@ -143,7 +143,99 @@ X-RateLimit-Reset: 1720000000
 - `X-RateLimit-Reset`：额度重置时间。
 - `Retry-After`：多久后可以重试。
 
-## 7. 分布式环境的问题
+## 7. Exceeding the Rate Limit
+
+当请求超过限流阈值时，API 通常返回 `429 Too Many Requests`。但是实际系统里，并不是所有超限请求都要立刻丢弃，也可以根据业务重要性延迟处理。
+
+例子：
+
+- 用户实时请求登录接口，超过限制后应该立即返回 429。
+- 某些订单处理任务可能因为系统过载被放入队列，稍后再处理。
+- 非核心后台任务可以被延迟。
+
+也就是说，超限策略可以是：
+
+- 直接拒绝。
+- 放入 message queue 稍后处理。
+- 降级处理。
+- 返回重试时间，让客户端稍后再试。
+
+## 8. Rate Limiter Headers
+
+客户端需要知道自己是否被限流，以及还剩多少额度。截图中列出三个常见响应头：
+
+### 8.1 X-RateLimit-Remaining
+
+表示当前窗口中还剩多少请求额度。
+
+```text
+X-RateLimit-Remaining: 12
+```
+
+### 8.2 X-RateLimit-Limit
+
+表示当前窗口中客户端最多能发多少请求。
+
+```text
+X-RateLimit-Limit: 100
+```
+
+### 8.3 X-RateLimit-Retry-After
+
+表示被限流后需要等待多少秒才能再次请求而不被 throttled。
+
+```text
+X-RateLimit-Retry-After: 60
+```
+
+有些系统也使用标准头：
+
+```text
+Retry-After: 60
+```
+
+## 9. 图 4-13：Detailed Design
+
+截图中的 detailed design 包含：
+
+- Rate limiter middleware。
+- Rules 存储在磁盘，worker 定期拉取规则并缓存。
+- Rate limiter 从 cache 读取 counters 和 last request timestamp。
+- 请求没被限流时转发到 API servers。
+- 请求被限流时可以返回 429，也可以进入 message queue 稍后处理。
+
+```mermaid
+flowchart TD
+    Client["Client"]
+    RL["Rate Limiter Middleware"]
+    API["API Servers"]
+    Cache[("Cache<br/>Counters / Timestamps")]
+    RulesDisk[("Rules on Disk")]
+    Worker["Worker<br/>periodically pulls rules"]
+    RulesCache["Rules Cache"]
+    MQ["Message Queue<br/>optional deferred processing"]
+    Reject["429 Too Many Requests"]
+
+    RulesDisk --> Worker --> RulesCache
+    Client --> RL
+    RL --> RulesCache
+    RL --> Cache
+    RL -- "not limited" --> API
+    RL -- "rate limited: option 1" --> Reject
+    RL -- "rate limited: option 2" --> MQ
+```
+
+处理逻辑：
+
+1. Rules 存在磁盘或配置中心。
+2. Worker 定期拉取 rules，放入 cache。
+3. 请求进入 rate limiter middleware。
+4. Middleware 从 rules cache 找到匹配规则。
+5. Middleware 从 Redis/cache 获取 counter 和 timestamp。
+6. 如果未超限，请求转发到 API servers，并更新 counter。
+7. 如果超限，返回 429 或放入 queue。
+
+## 10. 分布式环境的问题
 
 在分布式系统中，rate limiter middleware 可能有多个实例。
 
@@ -160,7 +252,7 @@ X-RateLimit-Reset: 1720000000
 - 使用 Lua script 保证检查和递增原子化。
 - 使用分布式缓存集群提升吞吐。
 
-## 8. 原子性问题
+## 11. Race Condition 竞态条件
 
 限流判断通常有两个动作：
 
@@ -176,20 +268,142 @@ X-RateLimit-Reset: 1720000000
 - Transaction。
 - Compare-and-set。
 
-## 9. 性能优化
+## 12. 图 4-14：竞态条件示例
 
-Rate limiter 位于请求路径上，所以要低延迟。
+截图中举例：
 
-优化方式：
+- Redis 中 counter 当前值是 3。
+- 两个请求几乎同时读取 counter。
+- 两个线程都认为 `counter + 1` 没有超过阈值。
+- 两个线程都把 counter 写回 4。
+- 实际上应该有一次写成 5 或其中一个被拒绝。
 
-- 使用内存存储，例如 Redis。
-- 规则本地缓存，避免每次查配置中心。
-- Redis 就近部署。
-- 批量或 pipeline 操作。
-- 对低风险接口使用宽松规则。
-- 使用 API Gateway 内置限流能力。
+```mermaid
+sequenceDiagram
+    participant R1 as Request 1
+    participant R2 as Request 2
+    participant Redis as Redis Counter
 
-## 10. 高可用与故障策略
+    Note over Redis: Original counter = 3
+    R1->>Redis: read counter = 3
+    R2->>Redis: read counter = 3
+    R1->>Redis: check and increment -> 4
+    R2->>Redis: check and increment -> 4
+    Note over Redis: Lost update / incorrect counter
+```
+
+解决方式：
+
+- Redis Lua script：把读取、检查、递增放在同一个原子脚本中。
+- Redis transaction。
+- Atomic INCR + TTL。
+- CAS，但在高并发下可能重试较多。
+
+## 13. Synchronization Issue 同步问题
+
+截图中提到，另一个分布式挑战是 synchronization。
+
+如果使用多个 rate limiter servers：
+
+- Client 1 可能访问 Rate Limiter 1。
+- Client 2 可能访问 Rate Limiter 2。
+- 如果每个 limiter 本地保存计数，就会出现不一致。
+
+## 14. 图 4-15：不同 Rate Limiter 之间状态不一致
+
+```mermaid
+flowchart TD
+    C1["Client 1"] --> RL1["Rate Limiter 1"]
+    C2["Client 2"] --> RL2["Rate Limiter 2"]
+    RL1 -. "local counter only" .-> Local1["Counter state 1"]
+    RL2 -. "local counter only" .-> Local2["Counter state 2"]
+```
+
+如果 Client 1 和 Client 2 属于同一个用户，但请求打到不同 limiter，本地 counter 不能反映全局请求数。
+
+## 15. 图 4-16：使用集中式 Redis 解决同步问题
+
+截图中建议不要用 sticky session，因为它 neither scalable nor flexible。更好的方式是使用 centralized data store，例如 Redis。
+
+```mermaid
+flowchart TD
+    C1["Client 1"] --> RL1["Rate Limiter 1"]
+    C2["Client 2"] --> RL2["Rate Limiter 2"]
+    RL1 --> Redis[("Centralized Redis<br/>Counters / Buckets")]
+    RL2 --> Redis
+```
+
+优点：
+
+- 多个 rate limiter 共享同一份 counter。
+- 更容易水平扩展 limiter instances。
+- 避免 sticky session。
+
+缺点：
+
+- Redis 成为核心依赖。
+- Redis 需要高可用。
+- Redis 延迟会影响请求路径。
+
+## 16. Performance Optimization 性能优化
+
+Rate limiter 位于请求路径上，性能非常重要。
+
+截图中提到两个方向：
+
+### 16.1 多数据中心与边缘部署
+
+如果 rate limiter 部署在离用户很远的地方，延迟会很高。可以把 rate limiter 放到多个 data centers 或 edge servers。
+
+例如 Cloudflare 在全球有许多 edge servers，流量会自动路由到最近的 edge server 以降低延迟。
+
+```mermaid
+flowchart TD
+    UserNA["User North America"] --> EdgeNA["Nearest Edge / Rate Limiter"]
+    UserEU["User Europe"] --> EdgeEU["Nearest Edge / Rate Limiter"]
+    UserAS["User Asia"] --> EdgeAS["Nearest Edge / Rate Limiter"]
+    EdgeNA --> Origin["Origin / API"]
+    EdgeEU --> Origin
+    EdgeAS --> Origin
+```
+
+### 16.2 最终一致性同步
+
+第二个优化方向是同步数据时使用 eventual consistency model。如果要求所有节点强一致，延迟和复杂度会变高。
+
+对于很多限流场景，短暂误差可以接受：
+
+- 某个用户可能多通过几个请求。
+- 几秒后全局状态收敛。
+
+但对支付、风控等高风险接口，可能需要更强一致。
+
+## 17. Monitoring 监控
+
+截图中强调，rate limiter 上线后要持续收集 analytics data，检查它是否有效。
+
+重点监控：
+
+- Rate limiting algorithm 是否有效。
+- Rate limiting rules 是否有效。
+- 429 数量和比例。
+- 被限流最多的用户、IP、API key。
+- Rate limiter latency。
+- Redis latency / error rate。
+- Allow / reject ratio。
+- 每个 endpoint 的限流命中率。
+
+监控能帮助发现：
+
+- 规则设置太宽，限流没起作用。
+- 规则设置太严，正常用户被误伤。
+- 突发流量或攻击。
+- 客户端 bug 导致重复请求。
+- Redis 或 limiter 自身成为瓶颈。
+
+一个常见问题：最初设置的规则可能很有效，但随着流量增长，规则可能变得无效。例如 flash sale 期间，正常流量也可能被误判为异常。此时可能要动态调整 bucket size、refill rate 或阈值。
+
+## 18. 高可用与故障策略
 
 Rate limiter 自身也可能故障。
 
@@ -226,34 +440,61 @@ Rate limiter 自身也可能故障。
 - 登录、支付等核心路径可能更偏 fail open 或降级。
 - 高风险、昂贵接口可能更偏 fail closed。
 
-## 11. 监控指标
+## 19. Step 4：Wrap Up
 
-需要监控：
+本章最后总结，rate limiter 的设计讨论了：
 
-- 总请求数。
-- 被限流请求数。
-- 429 比例。
-- Redis 延迟。
-- Redis 错误率。
-- 每条规则的命中次数。
-- 每个 endpoint 的限流情况。
-- Top throttled users / IPs。
-- Rate limiter 自身延迟。
+- Algorithms
+- Data structures
+- Architecture
+- Performance optimization
+- Monitoring
 
-这些指标帮助判断：
+还可以补充几个面试加分点。
 
-- 限流规则是否过严。
-- 是否存在攻击。
-- 是否有客户端 bug。
-- Redis 是否成为瓶颈。
+### 19.1 Hard vs Soft Rate Limiting
 
-## 12. 面试回答模板
+Hard rate limiting：
+
+- 请求数不能超过阈值。
+- 超过就拒绝。
+- 更严格。
+
+Soft rate limiting：
+
+- 请求可以短时间超过阈值。
+- 系统可能先允许 burst，然后慢慢收紧。
+- 对用户体验更友好。
+
+### 19.2 不同层级限流
+
+截图中提到本章只讨论 application layer，也就是 HTTP layer。
+
+实际上还可以在其他层限流：
+
+- Layer 3：IP 层限流。
+- Layer 4：Transport layer 限流。
+- Layer 7：Application / HTTP 层限流。
+
+本章重点是 HTTP API rate limiter。
+
+### 19.3 避免自己成为限流对象
+
+客户端也应该遵守最佳实践：
+
+- 使用 client cache，减少 API calls。
+- 理解并尊重 rate limit。
+- 不要在短时间内发送过多请求。
+- 对异常和 429 做退避重试。
+- 给重试逻辑加 backoff。
+
+## 20. 面试回答模板
 
 如果面试官问“设计一个 API rate limiter”，可以这样回答：
 
-> 我会先确认限流范围：是服务端 API rate limiter，支持按 user ID、IP、API key、endpoint 等维度限流。需求上要保证低延迟、内存效率、分布式限流、异常处理和高容错。高层设计上，我会把 rate limiter 放在 API gateway 或 server-side middleware，所有请求先经过限流器。限流器读取规则配置，根据请求生成限流 key，然后在 Redis 中读取并更新 counter 或 bucket 状态。如果未超限，请求转发给 API server；如果超限，返回 HTTP 429，并带上 Retry-After 和 X-RateLimit 相关响应头。算法上可以用 token bucket，因为它简单、省内存并允许一定 burst；如果需要更平滑输出可以用 leaky bucket，如果要准确滑动窗口可以用 sliding window log 或 sliding window counter。分布式环境中要使用共享存储和原子操作，比如 Redis Lua script，避免并发请求绕过限制。最后要监控 429 比例、规则命中、Redis 延迟和限流器自身延迟。
+> 我会先确认限流范围：是服务端 API rate limiter，支持按 user ID、IP、API key、endpoint 等维度限流。需求上要保证低延迟、内存效率、分布式限流、异常处理和高容错。高层设计上，我会把 rate limiter 放在 API gateway 或 server-side middleware，所有请求先经过限流器。限流器读取规则配置，根据请求生成限流 key，然后在 Redis 中读取并更新 counter 或 bucket 状态。如果未超限，请求转发给 API server；如果超限，返回 HTTP 429，并带上 X-RateLimit-Remaining、X-RateLimit-Limit、Retry-After 等响应头。算法上可以用 token bucket，因为它简单、省内存并允许一定 burst；如果需要更平滑输出可以用 leaky bucket，如果要准确滑动窗口可以用 sliding window log 或 sliding window counter。分布式环境中要使用共享存储和原子操作，比如 Redis Lua script，避免 race condition；多个 limiter 实例通过 centralized Redis 同步状态，避免 sticky session。性能上可以把 limiter 部署到多个数据中心或 edge，并用最终一致性降低同步成本。最后要监控 429 比例、规则命中、Redis 延迟和限流器自身延迟。
 
-## 13. 最终复习重点
+## 21. 最终复习重点
 
 - Rate limiter 控制单位时间内允许的请求数量。
 - 限流对象可以是 user、IP、device、API key、endpoint。
@@ -267,3 +508,8 @@ Rate limiter 自身也可能故障。
 - 分布式限流要用共享存储和原子操作。
 - Redis 常用于保存 counter / bucket 状态。
 - 限流器也要考虑故障策略、监控和规则配置。
+- Rate limit headers 帮助客户端理解剩余额度和重试时间。
+- Race condition 要用原子操作解决。
+- 多 limiter 实例要通过集中式存储同步状态。
+- 性能优化可以靠边缘部署、多数据中心和最终一致性。
+- Wrap up 时可以补充 hard/soft limiting、不同网络层限流和客户端最佳实践。
