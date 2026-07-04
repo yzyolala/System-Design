@@ -148,6 +148,29 @@ API Gateway 是一个 fully managed service，常见功能包括：
 
 自己实现一个商业级 rate limiting service 需要工程资源。如果时间或团队有限，可以使用成熟 gateway 或云服务能力。
 
+更直白地说：构建自己的限流服务需要时间。如果团队没有足够工程资源实现商业级 API Gateway，那么直接使用商业 API Gateway 往往是更好的选择。
+
+常见选择：
+
+- 云厂商 API Gateway。
+- NGINX / Envoy / Kong 等网关能力。
+- Service mesh 或 ingress controller 中的限流插件。
+- 第三方 managed API gateway。
+
+自建适合：
+
+- 限流规则强依赖内部业务逻辑。
+- 需要高度定制算法。
+- 现有网关能力不够。
+- 团队有足够工程资源维护高可用、监控、配置、回滚和扩容。
+
+商业或现成网关适合：
+
+- 团队资源有限。
+- 需求是常见 API 限流。
+- 希望快速上线。
+- 不想自己维护限流器高可用和配置系统。
+
 ## 10. 高层请求流程
 
 ```mermaid
