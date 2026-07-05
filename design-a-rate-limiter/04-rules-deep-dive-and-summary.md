@@ -85,6 +85,18 @@ flowchart TD
 
 截图中提到，使用数据库保存 counter 不理想，因为访问磁盘慢。内存缓存更适合；Redis 是常见选择。
 
+Redis 在限流中的作用可以白话理解为：帮所有 API server 共享同一个计数器。
+
+真实系统通常有很多台服务器：
+
+```text
+API Server 1
+API Server 2  -> Redis 记录 user_123 请求了几次
+API Server 3
+```
+
+如果每台机器自己数，请求打到不同机器时，计数就乱了。Redis 很快，并且可以设置过期时间，所以常用来保存限流状态。
+
 Redis 适合原因：
 
 - 内存存储，速度快。
@@ -105,6 +117,16 @@ EXPIRE key seconds
 ```text
 rate_limit:user:123:login:2026-07-03-10:01 -> 3
 ```
+
+固定窗口限流的 key 可能长这样：
+
+```text
+key = rate_limit:user_123:2026-07-03-10:01
+value = 3
+expire = 60 秒
+```
+
+每来一个请求，Redis 中的 value 加 1。如果超过阈值，就拒绝。
 
 ## 5. 请求通过或拒绝的流程
 
@@ -261,6 +283,20 @@ flowchart TD
 
 如果这两个动作不是原子的，并发请求可能同时看到 counter 还没超限，然后一起通过，导致超额。
 
+白话例子：
+
+```text
+规则：最多 5 次
+Redis 当前计数：4
+
+请求 A 读 Redis：现在是 4，4 + 1 = 5，可以通过
+请求 B 读 Redis：现在也是 4，4 + 1 = 5，也可以通过
+
+实际结果：两个请求都通过，总数变成 6，已经超限
+```
+
+这就是竞争条件：多个请求同时读写同一个计数器，导致判断不准。
+
 解决方式：
 
 - Redis Lua script。
@@ -299,6 +335,12 @@ sequenceDiagram
 - Atomic INCR + TTL。
 - CAS，但在高并发下可能重试较多。
 
+核心原则：
+
+```text
+检查 + 更新 必须原子化，不能分开执行。
+```
+
 ## 13. Synchronization Issue 同步问题
 
 截图中提到，另一个分布式挑战是 synchronization。
@@ -320,6 +362,16 @@ flowchart TD
 ```
 
 如果 Client 1 和 Client 2 属于同一个用户，但请求打到不同 limiter，本地 counter 不能反映全局请求数。
+
+白话例子：
+
+```text
+用户 A -> 限流器 1，限流器 1 觉得用户 A 请求了 3 次
+用户 A -> 限流器 2，限流器 2 觉得用户 A 请求了 3 次
+用户 A -> 限流器 3，限流器 3 觉得用户 A 请求了 3 次
+```
+
+每个限流器都觉得没超，但用户实际可能已经请求了 9 次。
 
 ## 15. 图 4-16：使用集中式 Redis 解决同步问题
 
@@ -409,7 +461,7 @@ Rate limiter 自身也可能故障。
 
 需要决定：
 
-### 10.1 Fail Open
+### 18.1 Fail Open
 
 限流器不可用时放行请求。
 
@@ -422,7 +474,14 @@ Rate limiter 自身也可能故障。
 
 - 攻击或突发流量可能打到后端。
 
-### 10.2 Fail Closed
+适合：
+
+- 普通业务接口。
+- 浏览商品。
+- 看评论。
+- 用户体验优先的读请求。
+
+### 18.2 Fail Closed
 
 限流器不可用时拒绝请求。
 
@@ -434,6 +493,14 @@ Rate limiter 自身也可能故障。
 
 - 正常用户也可能被拒绝。
 - 可用性变差。
+
+适合：
+
+- 登录。
+- 支付。
+- 验证码。
+- 风控。
+- 高风险或成本昂贵接口。
 
 真实系统通常按接口重要性选择：
 
@@ -488,13 +555,69 @@ Soft rate limiting：
 - 对异常和 429 做退避重试。
 - 给重试逻辑加 backoff。
 
-## 20. 面试回答模板
+## 20. 面试回答顺序
+
+如果面试官问“设计一个 API Rate Limiter”，可以按这个顺序回答。
+
+第一步，问需求：
+
+```text
+按 userId 限流，还是按 IP / API key / deviceId 限流？
+限流规则是多少？每秒、每分钟、每天？
+是否需要支持分布式？
+被限流后直接拒绝，还是排队稍后处理？
+```
+
+第二步，说高层架构：
+
+```text
+请求先经过 API Gateway / Rate Limiter Middleware。
+限流器根据 userId / IP / API key 生成限流 key。
+然后去 Redis 查询和更新计数。
+如果没超过限制，请求转发到后端。
+如果超过限制，返回 HTTP 429。
+```
+
+第三步，说算法：
+
+```text
+普通 API 限流可以用令牌桶或滑动窗口计数器。
+令牌桶允许短时间突发，适合大多数 API。
+滑动窗口计数器比固定窗口更平滑，内存也比滑动窗口日志低。
+登录防刷这种要求准确的场景，可以用滑动窗口日志。
+```
+
+第四步，说分布式问题：
+
+```text
+多台服务器必须共享限流状态，所以用 Redis。
+检查和增加计数要原子化，可以用 Redis Lua script。
+```
+
+第五步，说异常处理：
+
+```text
+超限返回 429，并带 Retry-After。
+Redis 挂了时，普通接口可以 fail open，敏感接口可以 fail closed。
+```
+
+## 21. 简洁背诵版
+
+> 我会把限流器放在 API Gateway 或服务端 middleware。请求进来后，根据 userId、IP 或 API key 生成限流 key。限流状态存在 Redis 里，因为系统是分布式的，多台服务需要共享计数。普通 API 我会选择令牌桶或滑动窗口计数器。令牌桶支持短时间突发，滑动窗口计数器在准确性和内存之间比较平衡。如果超过限制，返回 HTTP 429，并带上 Retry-After。为避免并发竞争，检查和更新计数需要原子化，比如使用 Redis Lua 脚本。如果 Redis 出故障，普通接口可以 fail open，安全敏感接口可以 fail closed。
+
+这段已经可以作为系统设计面试里的简洁回答。
+
+核心一句话：
+
+> 请求先进限流器，限流器查 Redis 看这个用户有没有超额；没超就放行，超了就返回 429。
+
+## 22. 面试回答模板
 
 如果面试官问“设计一个 API rate limiter”，可以这样回答：
 
-> 我会先确认限流范围：是服务端 API rate limiter，支持按 user ID、IP、API key、endpoint 等维度限流。需求上要保证低延迟、内存效率、分布式限流、异常处理和高容错。高层设计上，我会把 rate limiter 放在 API gateway 或 server-side middleware，所有请求先经过限流器。限流器读取规则配置，根据请求生成限流 key，然后在 Redis 中读取并更新 counter 或 bucket 状态。如果未超限，请求转发给 API server；如果超限，返回 HTTP 429，并带上 X-RateLimit-Remaining、X-RateLimit-Limit、Retry-After 等响应头。算法上可以用 token bucket，因为它简单、省内存并允许一定 burst；如果需要更平滑输出可以用 leaky bucket，如果要准确滑动窗口可以用 sliding window log 或 sliding window counter。分布式环境中要使用共享存储和原子操作，比如 Redis Lua script，避免 race condition；多个 limiter 实例通过 centralized Redis 同步状态，避免 sticky session。性能上可以把 limiter 部署到多个数据中心或 edge，并用最终一致性降低同步成本。最后要监控 429 比例、规则命中、Redis 延迟和限流器自身延迟。
+> 我会先确认限流范围：是服务端 API rate limiter，支持按 user ID、IP、API key、endpoint 等维度限流。需求上要保证低延迟、内存效率、分布式限流、异常处理和高容错。高层设计上，我会把 rate limiter 放在 API gateway 或 server-side middleware，所有请求先经过限流器。限流器读取规则配置，根据请求生成限流 key，然后在 Redis 中读取并更新 counter 或 bucket 状态。如果未超限，请求转发给 API server；如果超限，返回 HTTP 429，并带上 X-RateLimit-Remaining、X-RateLimit-Limit、Retry-After 等响应头。算法上，普通 API 我会优先考虑 token bucket 或 sliding window counter；token bucket 允许短时间突发，sliding window counter 在准确性和内存之间比较平衡。登录防刷这类要求准确的场景，可以用 sliding window log。分布式环境中要使用共享存储和原子操作，比如 Redis Lua script，避免 race condition；多个 limiter 实例通过 centralized Redis 同步状态，避免 sticky session。Redis 或限流器故障时，普通接口可以 fail open，安全敏感接口可以 fail closed。性能上可以把 limiter 部署到多个数据中心或 edge，并用最终一致性降低同步成本。最后要监控 429 比例、规则命中、Redis 延迟和限流器自身延迟。
 
-## 21. 最终复习重点
+## 23. 最终复习重点
 
 - Rate limiter 控制单位时间内允许的请求数量。
 - 限流对象可以是 user、IP、device、API key、endpoint。
@@ -513,3 +636,5 @@ Soft rate limiting：
 - 多 limiter 实例要通过集中式存储同步状态。
 - 性能优化可以靠边缘部署、多数据中心和最终一致性。
 - Wrap up 时可以补充 hard/soft limiting、不同网络层限流和客户端最佳实践。
+- Redis 的作用是让多台服务器共享同一份限流计数。
+- 面试回答可以按：需求、架构、算法、分布式、异常处理 5 步展开。
