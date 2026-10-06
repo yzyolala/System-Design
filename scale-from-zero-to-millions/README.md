@@ -5,16 +5,31 @@
 ## 笔记目录
 
 1. [单服务器架构与请求流程](01-single-server-and-request-flow.md)
+   - [面试题补充：单服务器架构与请求流程](01-single-server-and-request-flow-interview-questions.md)
 2. [数据库拆分、数据库选择与扩展方式](02-database-and-scaling.md)
+   - [面试题补充：数据库选择与扩展方式](02-database-and-scaling-interview-questions.md)
 3. [负载均衡与数据库复制](03-load-balancer-and-replication.md)
+   - [面试题补充：负载均衡与数据库复制](03-load-balancer-and-replication-interview-questions.md)
 4. [缓存 Cache](04-cache.md)
+   - [面试题补充：缓存](04-cache-interview-questions.md)
 5. [CDN 内容分发网络](05-cdn.md)
+   - [面试题补充：CDN 内容分发](05-cdn-interview-questions.md)
 6. [无状态 Web 层](06-stateless-web-tier.md)
+   - [面试题补充：无状态 Web 层](06-stateless-web-tier-interview-questions.md)
 7. [数据中心 Data Centers](07-data-centers.md)
+   - [面试题补充：多数据中心](07-data-centers-interview-questions.md)
 8. [消息队列 Message Queue](08-message-queue.md)
+   - [面试题补充：消息队列](08-message-queue-interview-questions.md)
 9. [日志、指标与自动化](09-logging-metrics-automation.md)
+   - [面试题补充：日志、指标与自动化](09-logging-metrics-automation-interview-questions.md)
 10. [数据库扩展与 Sharding](10-database-scaling-and-sharding.md)
+    - [面试题补充：数据库扩展与分片](10-database-scaling-and-sharding-interview-questions.md)
 11. [Millions of Users and Beyond 总结](11-millions-and-beyond-summary.md)
+    - [面试题补充：百万用户综合设计](11-millions-and-beyond-summary-interview-questions.md)
+
+## 面试题补充说明
+
+每篇笔记后附一个 `-interview-questions.md` 文件，包含相关公开反馈真题、来源、英文口述题干、练习追问和回答要点。公司归属依据 2025 年公开候选人反馈汇总；未逐题确认美国面试地点，也没有可复核的频率统计。练习追问和学习映射与已报道真题明确区分。
 
 ## 总体演进路线
 
